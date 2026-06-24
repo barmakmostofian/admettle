@@ -87,9 +87,7 @@ def load_pka_csv(
 def loo_splits(df: pd.DataFrame):
 
     """
-    Generate leave-one-out train/val splits from a molecule-level dataframe
-    (one row per unique molecule). Given the dataset size of only a few dozen 
-    molecules, a LOO-CV strategy is meaningful.
+    Generate leave-one-out train/val splits from a molecule-level dataframe.
     """
 
     df = df.reset_index(drop=True)
@@ -104,14 +102,14 @@ def loo_splits(df: pd.DataFrame):
 
 
 def build_datasets_from_dataframe(
-
     df: pd.DataFrame,
     smiles_col: str = "smiles",
     target_col: str = "pKa",
 ) -> list[data.MoleculeDatapoint]:
 
     """
-    Convert a dataframe with SMILES + target columns into MoleculeDatapoints.
+    Convert a dataframe with SMILES + target columns into MoleculeDatapoints --
+    a ChemProp-related object.
     """
 
     smiles = df[smiles_col].tolist()
@@ -144,7 +142,7 @@ def train_pka_model_loo(
 
     full_df = load_pka_csv(csv_path)
     n_molecules = len(full_df)
-    print(f"Running leave-one-out CV over {n_molecules} molecules "
+    print(f"Running LOO-CV over {n_molecules} molecules "
           f"({n_molecules} folds, one model trained per fold)")
 
     results = []
@@ -162,39 +160,53 @@ def train_pka_model_loo(
             eta_minutes = (avg_fold_time * remaining) / 60
             print(f"    (avg {avg_fold_time:.1f}s/fold so far, ~{eta_minutes:.1f} min remaining)")
 
+        # Convert training SMILES + pKa values into ChemProp MoleculeDatapoints.
         train_data = build_datasets_from_dataframe(train_df)
 
+        # Convert the single held-out molecule into a MoleculeDatapoint.
         val_data = build_datasets_from_dataframe(val_df)
 
+        # Instantiate the graph featurizer that converts SMILES into atom/bond feature tensors.
         featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
 
+        # Build the training dataset by applying the featurizer to each MoleculeDatapoint.
         train_dset = data.MoleculeDataset(train_data, featurizer)
 
+        # Build the validation dataset for the single held-out molecule.
         val_dset = data.MoleculeDataset(val_data, featurizer)
 
         # Scale targets (ChemProp recommends normalizing regression targets).
-        # The scaler is fit on this fold's training set only, never on the
-        # held-out molecule, to avoid leaking information about it.
+        # To avoid leaking, the scaler is fit on this fold's training set only, of course. 
         scaler = train_dset.normalize_targets()
 
+        # Apply the same scaler to the validation target (transform only, not refit).
         val_dset.normalize_targets(scaler)
 
+        # Wrap the training dataset in a dataloader for batched iteration during training.
         train_loader = data.build_dataloader(train_dset, shuffle=True)
 
+        # Wrap the validation dataset in a dataloader; no shuffling needed for inference.
         val_loader = data.build_dataloader(val_dset, shuffle=False)
 
+        # Instantiate the directed bond message-passing layer (the graph convolution core).
         mp = nn.BondMessagePassing()
 
+        # Instantiate the mean aggregation layer that pools bond representations into one molecular vector.
         agg = nn.MeanAggregation()
 
+        # Wrap the scaler into an output transform so predictions are returned in original pKa units.
         output_transform = nn.UnscaleTransform.from_standard_scaler(scaler)
 
+        # Instantiate the feed-forward regression head that maps the molecular vector to a pKa scalar.
         ffn = nn.RegressionFFN(output_transform=output_transform)
 
+        # Assemble the full MPNN model from the message-passing, aggregation, and FFN components.
         mpnn = models.MPNN(mp, agg, ffn, batch_norm=True, metrics=[nn.metrics.RMSE()])
 
+        # Define a per-fold subdirectory for saving this fold's checkpoint.
         fold_save_dir = Path(save_dir) / f"fold_{fold_idx:03d}_{held_out_id}"
 
+        # Instantiate the Lightning trainer that manages the training loop, logging, and checkpointing.
         trainer = pl.Trainer(
             max_epochs=max_epochs,
             default_root_dir=str(fold_save_dir),
@@ -203,22 +215,29 @@ def train_pka_model_loo(
             logger=False,
         )
 
+        # Run the training loop for this fold.
         trainer.fit(mpnn, train_loader, val_loader)
 
+        # Define the path where this fold's final checkpoint will be saved.
         ckpt_path = fold_save_dir / "final_model.ckpt"
 
+        # Save the trained model weights, architecture metadata, and scaler to disk.
         trainer.save_checkpoint(ckpt_path)
 
+        # Record this fold's checkpoint path for return to the caller.
         ckpt_paths.append(ckpt_path)
 
 
         # Predict on the held-out molecule with this fold's trained model
         mpnn.eval()
 
+        # Run inference on the held-out molecule.
         predictions = trainer.predict(mpnn, val_loader)
 
+        # Extract the scalar predicted pKa from the batched prediction output.
         predicted_pka = float(np.concatenate([p.numpy() for p in predictions]).flatten()[0])
 
+        # Extract the experimental pKa for the held-out molecule.
         true_pka = float(val_df["pKa"].iloc[0])
 
         results.append({
@@ -255,10 +274,11 @@ def train_pka_model_loo(
     return results_df, ckpt_paths
 
 
+
 if __name__ == "__main__":
 
-    results_df, ckpt_paths = train_pka_model_loo(csv_path="data/experimental_pka_data.csv", max_epochs=50,)
     # EDIT THIS PATH to point at your experimental pKa CSV
+    results_df, ckpt_paths = train_pka_model_loo(csv_path="data/experimental_pka_data.csv", max_epochs=50,)
 
     results_df.to_csv("loo_cv_predictions.csv", index=False)
 
