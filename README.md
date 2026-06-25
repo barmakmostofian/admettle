@@ -1,7 +1,9 @@
 # admettle
 
 A growing collection of small-molecule property prediction tools for computational drug discovery,
-with a focus on ADMET-relevant endpoints and CNS drug design.
+with a focus on ADMET-relevant endpoints and CNS drug design. This collection is supposed to include
+the latest and most popular models for property prediction and will be updated accordingly 
+(thus the name ADMET + mettle).
 
 ---
 
